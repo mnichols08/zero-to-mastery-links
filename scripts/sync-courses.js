@@ -134,14 +134,49 @@ function extractCoursesFromPage($) {
   return results;
 }
 
+// Strip filler tokens from a *raw* (pre-normalise) title so that fuzzy
+// matching survives ZTM renames that insert/remove words like "in 2026",
+// "with", "The", "A.I.", etc.  Must be called before normalizeTitle so
+// that word boundaries are still intact.
+function stripFillerRaw(title) {
+  return title
+    .replace(/\bin\s+\d{4}\b/gi, "") // "in 2026"
+    .replace(/\bA\.I\./gi, "") // "A.I."
+    .replace(/\bwith\b/gi, "")
+    .replace(/\bthe\b/gi, "");
+}
+
+// Fuzzy title match: returns the enrolled URL from byTitle whose key is a
+// substring of `norm` or vice-versa. Handles renames like adding "in 2026",
+// "with Zero to Mastery", "A.I.", dropping "The", etc.
+// `norm` is already normalizeTitle()'d; we re-derive the filler-stripped
+// version from the raw title passed as the second argument.
+function fuzzyTitleMatch(rawTitle, byTitle, norm) {
+  const normF = normalizeTitle(stripFillerRaw(rawTitle));
+  for (const [key, enrolledUrl] of byTitle) {
+    if (!enrolledUrl) continue; // skip entries with no enrolled URL
+    if (
+      normF.includes(key) ||
+      key.includes(normF) ||
+      norm.includes(key) ||
+      key.includes(norm)
+    )
+      return enrolledUrl;
+  }
+  return "";
+}
+
 // Merge scraped courses with existing enrolled URLs
 function mergeEnrolledUrls(scrapedCourses, byPublicUrl, byTitle) {
   return scrapedCourses.map((c) => {
     let enrolledUrl = "";
+    const norm = normalizeTitle(c.course);
     if (byPublicUrl.has(c.publicUrl)) {
       enrolledUrl = byPublicUrl.get(c.publicUrl);
     } else {
-      enrolledUrl = byTitle.get(normalizeTitle(c.course)) || "";
+      // Exact title match first, then fuzzy substring match as fallback
+      enrolledUrl =
+        byTitle.get(norm) || fuzzyTitleMatch(c.course, byTitle, norm);
     }
     return { ...c, enrolledUrl };
   });
@@ -258,8 +293,8 @@ async function run() {
     );
   }
 
-  unique.sort((a, b) => a.course.localeCompare(b.course));
-
+  // Preserve scrape order (category by category) so downstream consumers
+  // aren't affected by row reordering between runs.
   const merged = mergeEnrolledUrls(unique, byPublicUrl, byTitle);
   const withEnrolled = merged.filter((c) => c.enrolledUrl).length;
   const withoutEnrolled = merged.filter((c) => !c.enrolledUrl).length;
@@ -288,7 +323,7 @@ module.exports = {
   buildCSV,
 };
 
-// Only run when executed directly (node scripts/sync-courses.js), not when required by tests.
+// Only run when executed directly (node scripts/sync-courses.js), not when required by Jest.
 if (require.main === module) {
   run().catch((err) => {
     console.error("\n✗ Aborted:", err.message);
